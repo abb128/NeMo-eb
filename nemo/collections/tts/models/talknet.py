@@ -457,6 +457,6 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
         return (
             torch.randint(low=0, high=12, size=(1, 8)).long(),
             torch.tensor([8]),
-            torch.randint(low=0, high=12, size=(1, 8)).long()
+            torch.randint(low=0, high=12, size=(1, 8)).long(),
             torch.randn((1, 16))
         )
