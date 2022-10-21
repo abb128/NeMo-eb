@@ -28,7 +28,7 @@ from nemo.collections.tts.models.base import SpectrogramGenerator
 from nemo.collections.tts.modules.talknet import GaussianEmbedding, MaskedInstanceNorm1d, StyleResidual
 from nemo.core import Exportable
 from nemo.core.classes import ModelPT, PretrainedModelInfo, typecheck
-from nemo.core.neural_types import MelSpectrogramType, NeuralType
+from nemo.core.neural_types import MelSpectrogramType, NeuralType, TokenIndex, LengthsType, FloatType
 
 
 class TalkNetDursModel(ModelPT, Exportable):
@@ -47,7 +47,7 @@ class TalkNetDursModel(ModelPT, Exportable):
 
     def forward(self, text, text_len):
         x, x_len = self.embed(text).transpose(1, 2), text_len
-        y, _ = self.model(x, x_len)
+        y, _ = self.model(audio_signal=x, length=x_len)
         durs = self.proj(y).squeeze(1)
         return durs
 
@@ -128,6 +128,23 @@ class TalkNetDursModel(ModelPT, Exportable):
         list_of_models.append(model)
         return list_of_models
 
+    @property
+    def input_types(self):
+        """Returns definitions of module input ports.
+        """
+        return {
+            "text": NeuralType(('B', 'T'), TokenIndex()),
+            "text_len": NeuralType(tuple('B'), LengthsType())
+        }
+
+    @property
+    def output_types(self):
+        """Returns definitions of module output ports.
+        """
+        return {
+            "durs": NeuralType(('B', 'T'), FloatType())
+        }
+
 
 class TalkNetPitchModel(ModelPT, Exportable):
     """TalkNet's pitch prediction pipeline."""
@@ -147,10 +164,15 @@ class TalkNetPitchModel(ModelPT, Exportable):
 
     def forward(self, text, text_len, durs):
         x, x_len = self.embed(text, durs).transpose(1, 2), durs.sum(-1)
-        y, _ = self.model(x, x_len)
+        y, _ = self.model(audio_signal=x, length=x_len)
         f0_sil = self.sil_proj(y).squeeze(1)
         f0_body = self.body_proj(y).squeeze(1)
-        return f0_sil, f0_body
+
+        sil_mask = f0_sil.sigmoid() > 0.5
+        f0 = f0_body * self.f0_std + self.f0_mean
+        f0 = (~sil_mask * f0).float()
+
+        return f0
 
     def _metrics(self, true_f0, true_f0_mask, pred_f0_sil, pred_f0_body):
         sil_mask = true_f0 < 1e-5
@@ -234,13 +256,26 @@ class TalkNetPitchModel(ModelPT, Exportable):
         list_of_models.append(model)
         return list_of_models
 
-
-class TalkNetSpectModel(SpectrogramGenerator, Exportable):
-    """TalkNet's mel spectrogram prediction pipeline."""
+    @property
+    def input_types(self):
+        """Returns definitions of module input ports.
+        """
+        return {
+            "text": NeuralType(('B', 'T'), TokenIndex()),
+            "text_len": NeuralType(tuple('B'), LengthsType()),
+            "durs": NeuralType(('B', 'T'), FloatType())
+        }
 
     @property
     def output_types(self):
-        return OrderedDict({"mel-spectrogram": NeuralType(('B', 'D', 'T'), MelSpectrogramType())})
+        """Returns definitions of module output ports.
+        """
+        return {
+            "f0": NeuralType(('B', 'T'), FloatType())
+        }
+
+class TalkNetSpectModel(SpectrogramGenerator, Exportable):
+    """TalkNet's mel spectrogram prediction pipeline."""
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
         super().__init__(cfg=cfg, trainer=trainer)
@@ -324,69 +359,66 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
             tokens = AudioToCharWithDursF0Dataset.merge(tokens, value=self.vocab.pad, dtype=torch.long)
 
         text_len = torch.tensor(tokens.shape[-1], dtype=torch.long).unsqueeze(0)
-        durs = self._durs_model(tokens, text_len)
+        durs = self._durs_model(text=tokens, text_len=text_len)
         durs = durs.exp() - 1
         durs[durs < 0.0] = 0.0
         durs = durs.round().long()
 
         # Pitch
-        f0_sil, f0_body = self._pitch_model(tokens, text_len, durs)
-        sil_mask = f0_sil.sigmoid() > 0.5
-        f0 = f0_body * self._pitch_model.f0_std + self._pitch_model.f0_mean
-        f0 = (~sil_mask * f0).float()
+        f0 = self._pitch_model(text=tokens, text_len=text_len, durs=durs)
 
         # Spect
-        mel = self(tokens, text_len, durs, f0)
+        mel = self(text=tokens, text_len=text_len, durs=durs, f0=f0)
 
         return mel
     
-    def force_spectrogram(
-        self, tokens: torch.Tensor, durs: torch.Tensor, f0: torch.Tensor, **kwargs
-    ) -> torch.Tensor:
-        if self.blanking:
-            tokens = [
-                AudioToCharWithDursF0Dataset.interleave(
-                    x=torch.empty(len(t) + 1, dtype=torch.long, device=t.device).fill_(
-                        self.vocab.blank
-                    ),
-                    y=t,
-                )
-                for t in tokens
-            ]
-            tokens = AudioToCharWithDursF0Dataset.merge(
-                tokens, value=self.vocab.pad, dtype=torch.long
-            )
+    #def force_spectrogram(
+    #    self, tokens: torch.Tensor, durs: torch.Tensor, f0: torch.Tensor, **kwargs
+    #) -> torch.Tensor:
+    #    if self.blanking:
+    #        tokens = [
+    #            AudioToCharWithDursF0Dataset.interleave(
+    #                x=torch.empty(len(t) + 1, dtype=torch.long, device=t.device).fill_(
+    #                    self.vocab.blank
+    #                ),
+    #                y=t,
+    #            )
+    #            for t in tokens
+    #        ]
+    #        tokens = AudioToCharWithDursF0Dataset.merge(
+    #            tokens, value=self.vocab.pad, dtype=torch.long
+    #        )
+    #
+    #    text_len = torch.tensor(tokens.shape[-1], dtype=torch.long).unsqueeze(0)
+    #    durs_len = torch.tensor(durs.shape[-1], dtype=torch.long).unsqueeze(0)
+    #    assert text_len == durs_len
+    #
+    #    # Spect
+    #    mel = self(tokens, text_len, durs, f0)
+    #    return mel
 
-        text_len = torch.tensor(tokens.shape[-1], dtype=torch.long).unsqueeze(0)
-        durs_len = torch.tensor(durs.shape[-1], dtype=torch.long).unsqueeze(0)
-        assert text_len == durs_len
-
-        # Spect
-        mel = self(tokens, text_len, durs, f0)
-        return mel
-
-    def forward_for_export(self, tokens: torch.Tensor, text_len: torch.Tensor):
-        durs = self._durs_model(tokens, text_len)
-        durs = durs.exp() - 1
-        durs[durs < 0.0] = 0.0
-        durs = durs.round().long()
-
-        # Pitch
-        f0_sil, f0_body = self._pitch_model(tokens, text_len, durs)
-        sil_mask = f0_sil.sigmoid() > 0.5
-        f0 = f0_body * self._pitch_model.f0_std + self._pitch_model.f0_mean
-        f0 = (~sil_mask * f0).float()
-
-        # Spect
-        x, x_len = self.embed(tokens, durs).transpose(1, 2), durs.sum(-1)
-        f0, f0_mask = f0.clone(), f0 > 0.0
-        f0 = self.norm_f0(f0.unsqueeze(1), f0_mask)
-        f0[~f0_mask.unsqueeze(1)] = 0.0
-        x = self.res_f0(x, f0)
-        y, _ = self.model(x, x_len)
-        mel = self.proj(y)
-
-        return mel
+    #def forward_for_export(self, tokens: torch.Tensor, text_len: torch.Tensor):
+    #    durs = self._durs_model(tokens, text_len)
+    #    durs = durs.exp() - 1
+    #    durs[durs < 0.0] = 0.0
+    #    durs = durs.round().long()
+    #
+    #    # Pitch
+    #    f0_sil, f0_body = self._pitch_model(tokens, text_len, durs)
+    #    sil_mask = f0_sil.sigmoid() > 0.5
+    #    f0 = f0_body * self._pitch_model.f0_std + self._pitch_model.f0_mean
+    #    f0 = (~sil_mask * f0).float()
+    #
+    #    # Spect
+    #    x, x_len = self.embed(tokens, durs).transpose(1, 2), durs.sum(-1)
+    #    f0, f0_mask = f0.clone(), f0 > 0.0
+    #    f0 = self.norm_f0(f0.unsqueeze(1), f0_mask)
+    #    f0[~f0_mask.unsqueeze(1)] = 0.0
+    #    x = self.res_f0(x, f0)
+    #    y, _ = self.model(x, x_len)
+    #    mel = self.proj(y)
+    #
+    #    return mel
 
     @classmethod
     def list_available_models(cls) -> 'List[PretrainedModelInfo]':
@@ -411,3 +443,23 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
         )
         list_of_models.append(model)
         return list_of_models
+    
+    # text, text_len, durs, f0
+    @property
+    def input_types(self):
+        """Returns definitions of module input ports.
+        """
+        return {
+            "text": NeuralType(('B', 'T'), TokenIndex()),
+            "text_len": NeuralType(tuple('B'), LengthsType()),
+            "durs": NeuralType(('B', 'T'), FloatType()),
+            "f0": NeuralType(('B', 'T'), FloatType()),
+        }
+
+    @property
+    def output_types(self):
+        """Returns definitions of module output ports.
+        """
+        return {
+            "mel": NeuralType(('B', 'D', 'T'), MelSpectrogramType())
+        }
