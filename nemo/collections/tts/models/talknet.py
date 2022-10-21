@@ -298,7 +298,7 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
         f0 = self.norm_f0(f0.unsqueeze(1), f0_mask)
         f0[~f0_mask.unsqueeze(1)] = 0.0
         x = self.res_f0(x, f0)
-        y, _ = self.model(x, x_len)
+        y, _ = self.model(audio_signal=x, length=x_len)
         mel = self.proj(y)
         return mel
 
