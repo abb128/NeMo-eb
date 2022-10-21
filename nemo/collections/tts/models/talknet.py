@@ -31,7 +31,7 @@ from nemo.core.classes import ModelPT, PretrainedModelInfo, typecheck
 from nemo.core.neural_types import MelSpectrogramType, NeuralType
 
 
-class TalkNetDursModel(ModelPT):
+class TalkNetDursModel(ModelPT, Exportable):
     """TalkNet's durations prediction pipeline."""
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
@@ -129,7 +129,7 @@ class TalkNetDursModel(ModelPT):
         return list_of_models
 
 
-class TalkNetPitchModel(ModelPT):
+class TalkNetPitchModel(ModelPT, Exportable):
     """TalkNet's pitch prediction pipeline."""
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
