@@ -114,7 +114,10 @@ class ModelPT(LightningModule, Model):
         self._optimizer = None
         self._scheduler = None
         self.trainer = trainer  # reference required for self.*_rank
-        self._trainer = self.trainer  # alias for backward compatibility
+        if trainer is not None:
+            self._trainer = self.trainer  # alias for backward compatibility
+        else:
+            self._trainer = None
 
         self._set_model_guid()
 
