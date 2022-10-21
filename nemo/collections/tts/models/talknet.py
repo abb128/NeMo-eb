@@ -28,7 +28,7 @@ from nemo.collections.tts.models.base import SpectrogramGenerator
 from nemo.collections.tts.modules.talknet import GaussianEmbedding, MaskedInstanceNorm1d, StyleResidual
 from nemo.core import Exportable
 from nemo.core.classes import ModelPT, PretrainedModelInfo, typecheck
-from nemo.core.neural_types import MelSpectrogramType, NeuralType, TokenIndex, LengthsType, FloatType
+from nemo.core.neural_types import MelSpectrogramType, NeuralType, TokenIndex, LengthsType, FloatType, IntType
 
 
 class TalkNetDursModel(ModelPT, Exportable):
@@ -49,6 +49,10 @@ class TalkNetDursModel(ModelPT, Exportable):
         x, x_len = self.embed(text).transpose(1, 2), text_len
         y, _ = self.model(audio_signal=x, length=x_len)
         durs = self.proj(y).squeeze(1)
+
+        durs = durs.exp() - 1
+        durs[durs < 0.0] = 0.0 # ???
+        durs = durs.round().long()
         return durs
 
     @staticmethod
@@ -142,8 +146,21 @@ class TalkNetDursModel(ModelPT, Exportable):
         """Returns definitions of module output ports.
         """
         return {
-            "durs": NeuralType(('B', 'T'), FloatType())
+            "durs": NeuralType(('B', 'T'), IntType())
         }
+
+    def _prepare_for_export(self, **kwargs):
+        self.model._prepare_for_export(**kwargs)
+        Exportable._prepare_for_export(self, **kwargs)
+
+    def input_example(self):
+        """
+        Generates input examples for tracing etc.
+        Returns:
+            A tuple of input examples.
+        """
+        
+        return (torch.randint(low=0, high=12, size=(1, 8)).long(), torch.tensor([8]))
 
 
 class TalkNetPitchModel(ModelPT, Exportable):
@@ -263,7 +280,7 @@ class TalkNetPitchModel(ModelPT, Exportable):
         return {
             "text": NeuralType(('B', 'T'), TokenIndex()),
             "text_len": NeuralType(tuple('B'), LengthsType()),
-            "durs": NeuralType(('B', 'T'), FloatType())
+            "durs": NeuralType(('B', 'T'), IntType())
         }
 
     @property
@@ -273,6 +290,19 @@ class TalkNetPitchModel(ModelPT, Exportable):
         return {
             "f0": NeuralType(('B', 'T'), FloatType())
         }
+
+    def _prepare_for_export(self, **kwargs):
+        self.model._prepare_for_export(**kwargs)
+        Exportable._prepare_for_export(self, **kwargs)
+
+    def input_example(self):
+        """
+        Generates input examples for tracing etc.
+        Returns:
+            A tuple of input examples.
+        """
+        
+        return (torch.randint(low=0, high=12, size=(1, 8)).long(), torch.tensor([8]), torch.randint(low=0, high=12, size=(1, 8)).long())
 
 class TalkNetSpectModel(SpectrogramGenerator, Exportable):
     """TalkNet's mel spectrogram prediction pipeline."""
@@ -360,9 +390,6 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
 
         text_len = torch.tensor(tokens.shape[-1], dtype=torch.long).unsqueeze(0)
         durs = self._durs_model(text=tokens, text_len=text_len)
-        durs = durs.exp() - 1
-        durs[durs < 0.0] = 0.0
-        durs = durs.round().long()
 
         # Pitch
         f0 = self._pitch_model(text=tokens, text_len=text_len, durs=durs)
@@ -372,54 +399,6 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
 
         return mel
     
-    #def force_spectrogram(
-    #    self, tokens: torch.Tensor, durs: torch.Tensor, f0: torch.Tensor, **kwargs
-    #) -> torch.Tensor:
-    #    if self.blanking:
-    #        tokens = [
-    #            AudioToCharWithDursF0Dataset.interleave(
-    #                x=torch.empty(len(t) + 1, dtype=torch.long, device=t.device).fill_(
-    #                    self.vocab.blank
-    #                ),
-    #                y=t,
-    #            )
-    #            for t in tokens
-    #        ]
-    #        tokens = AudioToCharWithDursF0Dataset.merge(
-    #            tokens, value=self.vocab.pad, dtype=torch.long
-    #        )
-    #
-    #    text_len = torch.tensor(tokens.shape[-1], dtype=torch.long).unsqueeze(0)
-    #    durs_len = torch.tensor(durs.shape[-1], dtype=torch.long).unsqueeze(0)
-    #    assert text_len == durs_len
-    #
-    #    # Spect
-    #    mel = self(tokens, text_len, durs, f0)
-    #    return mel
-
-    #def forward_for_export(self, tokens: torch.Tensor, text_len: torch.Tensor):
-    #    durs = self._durs_model(tokens, text_len)
-    #    durs = durs.exp() - 1
-    #    durs[durs < 0.0] = 0.0
-    #    durs = durs.round().long()
-    #
-    #    # Pitch
-    #    f0_sil, f0_body = self._pitch_model(tokens, text_len, durs)
-    #    sil_mask = f0_sil.sigmoid() > 0.5
-    #    f0 = f0_body * self._pitch_model.f0_std + self._pitch_model.f0_mean
-    #    f0 = (~sil_mask * f0).float()
-    #
-    #    # Spect
-    #    x, x_len = self.embed(tokens, durs).transpose(1, 2), durs.sum(-1)
-    #    f0, f0_mask = f0.clone(), f0 > 0.0
-    #    f0 = self.norm_f0(f0.unsqueeze(1), f0_mask)
-    #    f0[~f0_mask.unsqueeze(1)] = 0.0
-    #    x = self.res_f0(x, f0)
-    #    y, _ = self.model(x, x_len)
-    #    mel = self.proj(y)
-    #
-    #    return mel
-
     @classmethod
     def list_available_models(cls) -> 'List[PretrainedModelInfo]':
         """
@@ -463,3 +442,21 @@ class TalkNetSpectModel(SpectrogramGenerator, Exportable):
         return {
             "mel": NeuralType(('B', 'D', 'T'), MelSpectrogramType())
         }
+
+    def _prepare_for_export(self, **kwargs):
+        self.model._prepare_for_export(**kwargs)
+        Exportable._prepare_for_export(self, **kwargs)
+    
+    def input_example(self):
+        """
+        Generates input examples for tracing etc.
+        Returns:
+            A tuple of input examples.
+        """
+        
+        return (
+            torch.randint(low=0, high=12, size=(1, 8)).long(),
+            torch.tensor([8]),
+            torch.randint(low=0, high=12, size=(1, 8)).long()
+            torch.randn((1, 16))
+        )
