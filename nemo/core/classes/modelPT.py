@@ -113,11 +113,11 @@ class ModelPT(LightningModule, Model):
         self._test_dl = None
         self._optimizer = None
         self._scheduler = None
-        self.trainer = trainer  # reference required for self.*_rank
         if trainer is not None:
+            self.trainer = trainer  # reference required for self.*_rank
             self._trainer = self.trainer  # alias for backward compatibility
-        else:
-            self._trainer = None
+        #else:
+        #    self._trainer = None
 
         self._set_model_guid()
 
