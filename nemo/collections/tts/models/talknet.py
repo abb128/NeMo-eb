@@ -45,10 +45,18 @@ class TalkNetDursModel(ModelPT, Exportable):
         d_out = cfg.model.jasper[-1].filters
         self.proj = nn.Conv1d(d_out, 1, kernel_size=1)
 
+        self.quant = torch.quantization.QuantStub()
+        self.dequant = torch.quantization.DeQuantStub()
+
     def forward(self, text, text_len):
         x, x_len = self.embed(text).transpose(1, 2), text_len
+
+        x = self.quant(x)
+        
         y, _ = self.model(audio_signal=x, length=x_len)
         durs = self.proj(y).squeeze(1)
+        
+        durs = self.dequant(durs)
 
         durs = durs.exp() - 1
         durs[durs < 0.0] = 0.0 # ???
