@@ -37,8 +37,8 @@ class GaussianEmbedding(nn.Module):
     def forward(self, text, durs):
         """See base class."""
         # Fake padding
-        text = F.pad(text, [0, 2, 0, 0], value=self.pad)
-        durs = F.pad(durs, [0, 2, 0, 0], value=0)
+        #text = F.pad(text, [0, 2, 0, 0], value=self.pad)
+        #durs = F.pad(durs, [0, 2, 0, 0], value=0)
 
         repeats = AudioToCharWithDursF0Dataset.repeat_merge(text, durs, self.pad)
         total_time = repeats.shape[-1]
